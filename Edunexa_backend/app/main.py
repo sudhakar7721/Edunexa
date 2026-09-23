@@ -6,7 +6,99 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel,EmailStr,Field
 from .config import CORS_ORIGINS,UPLOAD_DIR
 from .db import get_db,row,rows
-from .security import hash_password,verify_password,token,current_user,roles
+# =========================================================
+# Authentication / Security
+# Merged from security.py
+# =========================================================
+from datetime import datetime, timedelta, timezone
+
+import bcrypt
+from jose import jwt
+
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+from .config import SECRET_KEY
+
+bearer = HTTPBearer(auto_error=False)
+
+
+def hash_password(password: str) -> str:
+    password_bytes = password.encode("utf-8")
+    return bcrypt.hashpw(
+        password_bytes,
+        bcrypt.gensalt()
+    ).decode("utf-8")
+
+
+def verify_password(password: str, hashed_password: str) -> bool:
+    password_bytes = password.encode("utf-8")
+    hashed_bytes = hashed_password.encode("utf-8")
+    return bcrypt.checkpw(password_bytes, hashed_bytes)
+
+
+def token(uid, role):
+    return jwt.encode(
+        {
+            "sub": str(uid),
+            "role": role,
+            "exp": datetime.now(timezone.utc) + timedelta(hours=8)
+        },
+        SECRET_KEY,
+        algorithm="HS256"
+    )
+
+
+def current_user(
+    c: HTTPAuthorizationCredentials = Depends(bearer)
+):
+    if not c:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required"
+        )
+
+    try:
+        payload = jwt.decode(
+            c.credentials,
+            SECRET_KEY,
+            algorithms=["HS256"]
+        )
+        uid = int(payload["sub"])
+    except Exception:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired token"
+        )
+
+    with get_db() as db:
+        u = row(
+            db.execute(
+                "SELECT * FROM users WHERE id=? AND is_active=1",
+                (uid,)
+            )
+        )
+
+    if not u:
+        raise HTTPException(
+            status_code=401,
+            detail="User not found"
+        )
+
+    return u
+
+
+def roles(*allowed):
+    def dep(u=Depends(current_user)):
+        if u["role"] not in allowed:
+            raise HTTPException(
+                status_code=403,
+                detail="Insufficient permissions"
+            )
+        return u
+
+    return dep
+
+
 from .init_db import seed
 app=FastAPI(title='EduNexa V12 API',version='12.0',description='EduNexa Student Faculty HOD Management backend')
 app.add_middleware(CORSMiddleware,allow_origins=CORS_ORIGINS or ['*'],allow_credentials=True,allow_methods=['*'],allow_headers=['*'])
